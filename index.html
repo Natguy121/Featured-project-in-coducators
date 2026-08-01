@@ -892,7 +892,7 @@ document.getElementById('chatForm').addEventListener('submit', async e => {
   }catch(err){
     console.error('Ask the Cartographer error:', err);
     typingEl.remove();
-    addChatMsg('(connection hiccup — try asking again)', 'sys');
+    addChatMsg('(' + (err.message || 'connection hiccup') + ' — try asking again)', 'sys');
     ai.history.pop();
     ai.questionCount--;
     updateQuestionCount();
@@ -917,8 +917,9 @@ document.getElementById('useAiHint').addEventListener('click', async () => {
     typingEl.remove();
     addChatMsg(reply, 'ai');
   }catch(err){
+    console.error('AI hint error:', err);
     typingEl.remove();
-    addChatMsg('(connection hiccup — hint unavailable, try again)', 'sys');
+    addChatMsg('(' + (err.message || 'connection hiccup') + ' — hint unavailable, try again)', 'sys');
   }
 });
 
