@@ -794,8 +794,8 @@ function winFlagGame(){
 
 document.getElementById('flagEndHome').addEventListener('click', () => showScreen('home'));
 
-/* ---------------- ASK THE AI GAME ---------------- */
-let ai = null; // { target:{code,name}, history:[], solved:false, questionCount:0 }
+/* ---------------- ASK THE CARTOGRAPHER (rule-based, no backend) ---------------- */
+let ai = null; // { target:{code,name}, facts, solved:false, questionCount:0, given:Set }
 
 function addChatMsg(text, cls){
   const log = document.getElementById('chatLog');
@@ -821,31 +821,159 @@ function updateQuestionCount(){
   el.textContent = ai.questionCount + ' QUESTION' + (ai.questionCount === 1 ? '' : 'S') + ' ASKED';
 }
 
-function startAiGame(){
+// Classify an RGB pixel into a coarse named color bucket via HSL.
+function nearestColorName(r, g, b){
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  let h = 0, s = 0;
+  if (d !== 0){
+    s = d / (1 - Math.abs(2 * l - 1));
+    if (max === r) h = 60 * (((g - b) / d) % 6);
+    else if (max === g) h = 60 * (((b - r) / d) + 2);
+    else h = 60 * (((r - g) / d) + 4);
+  }
+  if (h < 0) h += 360;
+  if (l < 0.14) return 'black';
+  if (l > 0.90) return 'white';
+  if (s < 0.18) return 'gray';
+  if (h < 15 || h >= 345) return 'red';
+  if (h < 45) return (l < 0.42 ? 'brown' : 'orange');
+  if (h < 68) return 'yellow';
+  if (h < 170) return 'green';
+  if (h < 200) return 'cyan';
+  if (h < 255) return 'blue';
+  if (h < 290) return 'purple';
+  if (h < 345) return 'pink';
+  return 'red';
+}
+
+function countRuns(arr){
+  let runs = 1;
+  for (let i = 1; i < arr.length; i++) if (arr[i] !== arr[i-1]) runs++;
+  return runs;
+}
+
+// Samples the real flag image via canvas to get its actual dominant colors
+// and stripe orientation — not guessed, measured from the pixels.
+function loadFlagFacts(code){
+  return new Promise(resolve => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    const finish = (facts) => resolve(facts);
+    img.onload = () => {
+      try{
+        const w = 60, h = 40;
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h).data;
+
+        const counts = {};
+        for (let i = 0; i < data.length; i += 4){
+          if (data[i+3] < 100) continue;
+          const name = nearestColorName(data[i], data[i+1], data[i+2]);
+          counts[name] = (counts[name] || 0) + 1;
+        }
+        const total = w * h;
+        const colors = Object.entries(counts)
+          .filter(([,n]) => n > total * 0.035)
+          .sort((a,b) => b[1] - a[1])
+          .map(([name]) => name)
+          .slice(0, 4);
+
+        const midY = Math.floor(h / 2);
+        const rowSeq = [];
+        for (let x = 0; x < w; x += 2){
+          const idx = (midY * w + x) * 4;
+          rowSeq.push(nearestColorName(data[idx], data[idx+1], data[idx+2]));
+        }
+        const midX = Math.floor(w / 2);
+        const colSeq = [];
+        for (let y = 0; y < h; y++){
+          const idx = (y * w + midX) * 4;
+          colSeq.push(nearestColorName(data[idx], data[idx+1], data[idx+2]));
+        }
+        const rowRuns = countRuns(rowSeq);
+        const colRuns = countRuns(colSeq);
+        let stripes = 'none';
+        if (rowRuns >= 3 && rowRuns > colRuns) stripes = 'vertical';
+        else if (colRuns >= 3 && colRuns > rowRuns) stripes = 'horizontal';
+
+        finish({ colors, stripes, available: true });
+      }catch(e){
+        finish({ colors: [], stripes: 'unknown', available: false });
+      }
+    };
+    img.onerror = () => finish({ colors: [], stripes: 'unknown', available: false });
+    img.src = `https://flagcdn.com/w320/${code}.png`;
+  });
+}
+
+const REGION_KEYWORDS = [
+  ['middle east', 'Middle East'], ['central asia', 'Central Asia'], ['caucasus', 'Caucasus'],
+  ['north america', 'North America'], ['south america', 'South America'],
+  ['africa', 'Africa'], ['asia', 'Asia'], ['europe', 'Europe'], ['oceania', 'Oceania']
+];
+const COLOR_WORDS = ['red','orange','yellow','green','blue','purple','pink','white','black','gray','grey','brown','cyan'];
+
+function answerQuestion(question, ai){
+  const q = question.toLowerCase();
+  const facts = ai.facts;
+  const region = REGION_OF[ai.target.code] || null;
+
+  const askedColors = COLOR_WORDS.filter(c => new RegExp('\\b' + c + '\\b').test(q)).map(c => c === 'grey' ? 'gray' : c);
+  if (askedColors.length){
+    if (!facts.available) return "My eyes are foggy on the exact palette today — try asking about its region instead.";
+    const matches = askedColors.filter(c => facts.colors.includes(c));
+    return matches.length
+      ? `Aye, ${matches.join(' and ')} does appear on this flag.`
+      : `No, I don't spot ${askedColors.join(' or ')} on this one.`;
+  }
+  if (q.includes('color') || q.includes('colour')){
+    if (!facts.available || !facts.colors.length) return "My charts are smudged on the palette for this one — ask me something else.";
+    return `From what I can tell, its palette leans ${facts.colors.slice(0, 3).join(', ')}.`;
+  }
+  if (q.includes('stripe') || q.includes('striped') || q.includes('band')){
+    if (!facts.available) return "Can't quite make out the pattern from here — try a region or color question.";
+    if (facts.stripes === 'horizontal') return 'Yes, arranged in horizontal bands.';
+    if (facts.stripes === 'vertical') return 'Yes, arranged in vertical bands.';
+    return 'No obvious stripes — more of a solid field or centered emblem.';
+  }
+
+  for (const [kw, label] of REGION_KEYWORDS){
+    if (q.includes(kw)){
+      const match = region ? region.includes(label) : false;
+      return match ? `Indeed — you'll find it in ${region}.` : `No, this one isn't from ${label}.`;
+    }
+  }
+  if (q.includes('continent') || q.includes('region') || q.includes('where') || q.includes('located')){
+    return region ? `It hails from ${region}.` : `My charts are hazy on its exact region.`;
+  }
+
+  if (q.includes('capital') || q.includes('population') || q.includes('language') || q.includes('currency') || q.includes('history')){
+    return "A fine question, but my charts only cover colors, patterns, and geography — not census records.";
+  }
+
+  const bits = [];
+  if (region) bits.push(`it comes from ${region}`);
+  if (facts.available && facts.colors.length) bits.push(`its palette includes ${facts.colors.slice(0, 2).join(' and ')}`);
+  if (bits.length) return `Hmm — I can tell you that ${bits.join(', and ')}.`;
+  return "That's a tricky one for my old charts — try asking about its colors, patterns, or region.";
+}
+
+async function startAiGame(){
   const pick = COUNTRIES[Math.floor(Math.random() * COUNTRIES.length)];
-  ai = { target: { code: pick[0], name: pick[1] }, history: [], solved: false, questionCount: 0 };
+  ai = { target: { code: pick[0], name: pick[1] }, facts: { colors: [], stripes: 'unknown', available: false }, solved: false, questionCount: 0 };
   document.getElementById('chatLog').innerHTML = '';
   addChatMsg('I am thinking of a flag. Ask me yes/no or descriptive questions about it, then type the country name when you are ready to guess.', 'sys');
   document.getElementById('chatInput').value = '';
   document.getElementById('chatSend').disabled = false;
   updateQuestionCount();
   showScreen('aigame');
-}
-
-async function callClaude(systemPrompt, history){
-  // Calls our own Vercel serverless function (/api/chat), which holds the
-  // Anthropic API key server-side and forwards the request. The browser
-  // never talks to api.anthropic.com directly.
-  const response = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ system: systemPrompt, messages: history })
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok){
-    throw new Error(data.error || ('API error ' + response.status));
-  }
-  return data.text || "Hmm, I'm not sure how to answer that — try another question.";
+  ai.facts = await loadFlagFacts(pick[0]);
 }
 
 document.getElementById('chatForm').addEventListener('submit', async e => {
@@ -876,51 +1004,29 @@ document.getElementById('chatForm').addEventListener('submit', async e => {
 
   ai.questionCount++;
   updateQuestionCount();
-  ai.history.push({ role: 'user', content: raw });
   document.getElementById('chatSend').disabled = true;
   const typingEl = addTypingIndicator();
-  try{
-    const sys = `You are "The Cartographer," a witty, knowledgeable guide in a flag-guessing game. The secret answer is the country: ${ai.target.name}. ` +
-      `The player will ask yes/no or descriptive questions about its flag, geography, culture, or history to narrow down the answer. ` +
-      `Remember the full conversation so far and stay consistent with everything you've already told them — never contradict an earlier answer. ` +
-      `Answer honestly and vividly in 1-2 short sentences, with a bit of character and flair, like a seasoned mapmaker. ` +
-      `NEVER say the country's name or any other specific country name in your answer, and never confirm or deny a guess directly — the game handles guesses separately.`;
-    const reply = await callClaude(sys, ai.history);
-    ai.history.push({ role: 'assistant', content: reply });
+  const reply = answerQuestion(raw, ai);
+  setTimeout(() => {
     typingEl.remove();
     addChatMsg(reply, 'ai');
-  }catch(err){
-    console.error('Ask the Cartographer error:', err);
-    typingEl.remove();
-    addChatMsg('(' + (err.message || 'connection hiccup') + ' — try asking again)', 'sys');
-    ai.history.pop();
-    ai.questionCount--;
-    updateQuestionCount();
-  }
-  document.getElementById('chatSend').disabled = false;
+    document.getElementById('chatSend').disabled = false;
+  }, 350 + Math.random() * 300);
 });
 
-document.getElementById('useAiHint').addEventListener('click', async () => {
+document.getElementById('useAiHint').addEventListener('click', () => {
   if (!ai || ai.solved || profile.aiHints <= 0) return;
   profile.aiHints--;
   saveProfile();
   renderWallet();
-  addChatMsg('(using a hint…)', 'sys');
-  const typingEl = addTypingIndicator();
-  try{
-    const sys = `You are "The Cartographer" in a flag-guessing game. The secret answer is the country: ${ai.target.name}. ` +
-      `Give the player one short, vivid, helpful clue about the flag's appearance, the country's geography, or its culture, WITHOUT naming the country. One sentence only. ` +
-      `Make it a clue you have not already given if there is prior conversation context.`;
-    const history = ai.history.concat([{ role: 'user', content: 'Give me a hint.' }]);
-    const reply = await callClaude(sys, history);
-    ai.history.push({ role: 'user', content: '(requested a hint)' }, { role: 'assistant', content: reply });
-    typingEl.remove();
-    addChatMsg(reply, 'ai');
-  }catch(err){
-    console.error('AI hint error:', err);
-    typingEl.remove();
-    addChatMsg('(' + (err.message || 'connection hiccup') + ' — hint unavailable, try again)', 'sys');
-  }
+  const region = REGION_OF[ai.target.code];
+  const facts = ai.facts;
+  const parts = [];
+  if (facts.available && facts.colors.length) parts.push('its colors include ' + facts.colors.slice(0, 2).join(' and '));
+  if (facts.available && facts.stripes !== 'none' && facts.stripes !== 'unknown') parts.push('it has ' + facts.stripes + ' bands');
+  if (region) parts.push('it is from ' + region);
+  parts.push('the name starts with "' + ai.target.name[0].toUpperCase() + '"');
+  addChatMsg('(hint) ' + parts.join(', ') + '.', 'sys');
 });
 
 document.getElementById('giveUpBtn').addEventListener('click', () => {

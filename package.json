@@ -1,9 +1,0 @@
-{
-  "name": "atlas-flag-game",
-  "version": "1.0.0",
-  "private": true,
-  "description": "ATLAS - a two-part flag guessing game with an AI-powered mode",
-  "scripts": {
-    "dev": "vercel dev"
-  }
-}
